@@ -1,9 +1,8 @@
-# Game of Frueets: the server (Step 12)
+# Game of Frueets: the server (Step 13a: rooms and the lobby)
 
-This folder is a tiny Node server. Its only job right now is to prove three things:
-1. a server of ours can run on Render,
-2. a browser can hold an open "phone line" (WebSocket) to it, and
-3. the rulebook (`engine.js`) works there exactly as it does in the game page.
+This is a small Node server. It now has **rooms**: a host opens a room, gets a 4-letter code, friends join with the code, and the host starts the game (the server then creates it with `engine.js`, the rulebook). Anyone whose connection drops can come back to the same seat using the secret ticket (token) their browser kept.
+
+Not yet: the ball. That is the next step.
 
 ## The files, and how to read them (in this order)
 
@@ -13,6 +12,7 @@ This folder is a tiny Node server. Its only job right now is to prove three thin
 | `server.js` | Opens the doors, listens, answers. Uses `engine.js`. | The kitchen |
 | `package.json` | The shopping list (`ws`) and the command to start (`npm start`). | The recipe card header |
 | `package-lock.json` | The exact versions bought, so every computer gets the same. | The receipt |
+| `rooms.test.js` | Starts the server and tests rooms with fake players. | A rehearsal before opening night |
 | `.gitignore` | Tells Git not to upload `node_modules`. | "Don't pack the groceries" |
 
 Read `server.js` top to bottom. Every part is commented. The four ideas in it:
@@ -20,6 +20,11 @@ Read `server.js` top to bottom. Every part is commented. The four ideas in it:
 - **`httpServer`** answers "letters": the test page at `/` and a `/health` check.
 - **`wss.on("connection", ...)`** runs once for each person who connects. `socket` is the phone line to that one person.
 - **`socket.on("message", ...)`** runs each time that person speaks. We read the JSON, look at `type`, and reply.
+
+## Try the rooms
+Open the server's address (your Render address, or http://localhost:3000) in **two browser tabs**. Tab 1: type a name, press **Create room**. Tab 2: type another name, press **Join** (the code is already filled in, because both tabs share the same browser). Then press **Start** in tab 1. The log shows exactly what the server sends everyone.
+
+To run the automatic tests: `node rooms.test.js` (17 checks).
 
 ## Try it on your own computer first
 
@@ -48,5 +53,5 @@ Render runs your server on a computer in a data centre and gives it a web addres
 Why `process.env.PORT`? Render decides which door your server must use and tells it through that setting. `server.js` reads it and falls back to 3000 on your own computer.
 
 ## What comes next
-- **Step 13:** rooms (4-letter codes), turns, and the physics on the server so everyone sees the same ball.
+- **Step 13b:** the physics on the server, so everyone sees the same ball, and turns.
 - **Step 14:** the game page connects to this server, and the join links `www.alt108.com/frueets/?room=KQWM` start working.
