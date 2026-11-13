@@ -1,0 +1,15 @@
+{
+  "name": "frueets-server",
+  "version": "1.0.0",
+  "description": "Game of Frueets: the multiplayer server (Step 12: a tiny server that proves the rulebook runs on Render)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
