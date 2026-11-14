@@ -1,5 +1,5 @@
 /* ============================================================================
-   server.js  -  STEP 13a: ROOMS AND THE LOBBY
+   server.js  -  STEP 13b: THE BALL (physics on the server)
    ============================================================================
    NEW IN THIS STEP (on top of the tiny server of Step 12):
      * ROOMS. A room is one table of friends. It has a 4-letter code (like KQWM). ANALOGY: a hotel with many
@@ -9,24 +9,36 @@
        "same code and same name" safe: someone else typing your name does not have your ticket.)
      * The HOST is whoever created the room. Only the host can press Start.
      * When the host starts, the server creates the game with engine.js (the rulebook) and sends everyone the state.
-   NOT YET: the ball. Step 13b adds the physics so the server drops the ball and everyone watches the same one.
+   NEW IN 13b: THE BALL. Each room owns a "board" (board.js: pegs, cups, Matter.js physics). When the player whose turn it is
+   lets go of the spring, they send ONE number, the power. The SERVER drops the ball and runs the physics 60 times a second,
+   sending everyone the ball's position as it falls: { type: "ball", x, y }. When it lands, the server tells the rulebook
+   (engine.js), which pays the prize. ANALOGY: one referee rolls the dice in the middle of the table; everyone watches the same roll.
+   Because the server decides everything, nobody can cheat by changing their own copy of the game.
 
    MESSAGES THE CLIENT CAN SEND (all JSON, always with a "type"):
      { type: "create", name }                     open a new room, you are the host
      { type: "join", code, name, token? }         join (or rejoin, if you pass your old token)
      { type: "start" }                            host only: begin the game
      { type: "bet", step: +1 or -1 }              change your bet (only on your turn, before inserting)
+     { type: "primary" }                          the big overlay button: Insert / Play again / Pass / Settle up (your turn)
+     { type: "release", power: 0..1 }             let go of the spring: drops the ball (your turn, game in progress)
+     { type: "tilt" }                             nudge the rolling ball (your turn; rules decide if it is allowed)
+     { type: "shuffle" }                          rearrange the cups between balls (once per ball)
+     { type: "cashout" }                          leave the game and keep your money; mid-game the bet is forfeited (your turn, ball not rolling)
      { type: "leave" }                            leave the room
    MESSAGES THE SERVER SENDS BACK:
      { type: "joined", code, token, name, host }  once, just for you: keep the token!
-     { type: "room", code, started, members: [{ name, connected, host }], session }   to everyone, whenever anything changes
+     { type: "room", code, started, members, session, cups, rolling }   to everyone, whenever anything changes
+     { type: "ball", x, y }                       60 times a second while a ball is moving (x is null when it disappears)
+     { type: "event", name, ... }                 things to play a sound for: insert, release, landed, tilt, shuffle, pass, final
      { type: "error", message }
    ============================================================================ */
 
 const http = require("http");               // built into Node: makes a web server
 const crypto = require("crypto");           // built into Node: makes hard-to-guess random tokens
 const { WebSocketServer } = require("ws");  // the package we installed with npm: the open phone line
-const Rules = require("./engine.js");       // OUR rulebook (a file next to this one)
+const Rules = require("./engine.js");       // OUR rulebook: money and turns (a file next to this one)
+const Board = require("./board.js");        // OUR table: pegs, cups and the ball (needs the matter-js package)
 
 // The door to knock on. On Render, process.env.PORT is set for us. On your own computer there is none, so we use 3000.
 const PORT = process.env.PORT || 3000;
@@ -79,7 +91,8 @@ const httpServer = http.createServer(function (request, response) {
 
 // ---------- 2. ROOMS ----------
 // "rooms" is the hotel's register: room code -> room.
-//   room = { code, members: [ { token, name, socket, connected, host } ], S: the game (or null until Start), lastActive }
+//   room = { code, members: [ { token, name, socket, connected, host } ], S: the game rules state (or null until Start),
+//            board: the physics table, reshuffleUsed, bank + lastTick (the physics clock), lastActive }
 const rooms = new Map();
 
 // Letters that can't be mistaken for each other when read out loud or typed on a phone (no I, no O).
@@ -104,7 +117,9 @@ function roomView(room) {
     code: room.code,
     started: room.S !== null,
     members: room.members.map(function (m) { return { name: m.name, connected: m.connected, host: m.host }; }),
-    session: room.S
+    session: room.S,
+    cups: room.board ? room.board.getCups() : null,           // where each fruit's cup is (left and right edge, in board pixels)
+    rolling: room.board ? room.board.isRolling() : false
   };
 }
 
@@ -125,7 +140,50 @@ function fixHost(room) {
   if (next) { next.host = true; }
 }
 
-// ---------- 3. WEBSOCKET: the open phone line ----------
+// Send one message to everyone in the room.
+function tellAll(room, object) {
+  for (const m of room.members) { if (m.connected) { send(m.socket, object); } }
+}
+
+// Is it this person's turn in a running game?
+function isTheirTurn(room, member) {
+  return room.S !== null && Rules.me(room.S).name === member.name;
+}
+
+// ---------- THE PHYSICS CLOCK ----------
+// Every 10 ms we look at each room. If a ball is in play we work out how much real time has passed and advance the
+// physics by that much, in equal 1/60-second steps (the same idea as the "fixed timestep" in the game page).
+// Then we send everyone the ball's new position.
+const TICK_MS = 10;
+setInterval(function () {
+  const now = Date.now();
+  for (const room of rooms.values()) {
+    if (!room.board || !room.board.hasBall()) { room.bank = 0; room.lastTick = now; continue; }
+    room.bank += Math.min(now - room.lastTick, 100);          // never catch up more than 0.1 s in one go
+    room.lastTick = now;
+    let steps = 0;
+    while (room.bank >= Board.STEP_MS && steps < 5 && room.board.hasBall()) {
+      const events = room.board.step();
+      room.bank -= Board.STEP_MS;
+      steps++;
+      for (const e of events) { onBoardEvent(room, e); }
+    }
+    const p = room.board.position();
+    tellAll(room, p ? { type: "ball", x: Math.round(p.x * 10) / 10, y: Math.round(p.y * 10) / 10 } : { type: "ball", x: null });
+  }
+}, TICK_MS);
+
+// Something happened on the board (a ball landed in a cup, or its sitting time is over).
+function onBoardEvent(room, e) {
+  if (e.type === "landed") {
+    const result = Rules.ballLanded(room.S, e.fruit);         // the rulebook counts the ball and, on the last one, pays the prize
+    tellAll(room, { type: "event", name: "landed", fruit: e.fruit, cup: e.cup, finished: result.finished });
+    broadcast(room);
+  }
+  // "cleared" needs no action: the next tick sends { type: "ball", x: null } and everyone's ball disappears.
+}
+
+// ---------- 4. WEBSOCKET: the open phone line ----------
 // We attach the WebSocket server to the same HTTP server, so both share one door (one port).
 const wss = new WebSocketServer({ server: httpServer });
 
@@ -147,7 +205,7 @@ wss.on("connection", function (socket) {
     if (message.type === "create") {
       if (socket.room) return fail(socket, "You are already in a room");
       const name = cleanName(message.name) || "Player 1";
-      const room = { code: makeRoomCode(), members: [], S: null, lastActive: Date.now() };
+      const room = { code: makeRoomCode(), members: [], S: null, board: null, reshuffleUsed: false, bank: 0, lastTick: Date.now(), lastActive: Date.now() };
       rooms.set(room.code, room);
       seat(socket, room, name, true);
       return;
@@ -190,6 +248,8 @@ wss.on("connection", function (socket) {
       if (room.S !== null) return;
       const names = room.members.map(function (m) { return m.name; });
       room.S = Rules.newSession(names);           // the rulebook seats everyone, in joining order
+      room.board = Board.createBoard();           // and the table is built
+      room.board.setCups(room.board.newLayout());
       broadcast(room);
       return;
     }
@@ -201,6 +261,72 @@ wss.on("connection", function (socket) {
       if (Rules.me(S).name !== socket.member.name) return;       // not your turn
       const step = message.step > 0 ? 1 : -1;
       if (Rules.changeBet(S, step)) { broadcast(room); }
+      return;
+    }
+
+    // ----- everything from here on is in-game and only for the player whose turn it is -----
+    const S = room.S;
+    const mine = S !== null && isTheirTurn(room, socket.member);
+
+    // ----- the big overlay button (same logic as the game page's primaryAction) -----
+    if (message.type === "primary") {
+      if (!S || room.board.hasBall() && room.board.isRolling()) return;
+      if (!mine && !socket.member.host) return;                  // the host may also press it, so a stuck game can always move on
+      if (S.state === "idle" || S.state === "result" && (S.keepsTurn || Rules.activePlayers(S).length <= 1)) {
+        if (!mine) return;
+        if (!Rules.startGame(S).ok) return;
+        room.board.clear();
+        room.board.setCups(room.board.newLayout());             // fresh cups every game
+        room.reshuffleUsed = false;
+        tellAll(room, { type: "event", name: "insert" });
+      } else if (S.state === "result") {
+        if (!Rules.advanceTurn(S)) return;
+        tellAll(room, { type: "event", name: "pass" });
+      } else if (S.state === "gameover") {
+        if (Rules.activePlayers(S).length > 0) { Rules.advanceTurn(S); tellAll(room, { type: "event", name: "pass" }); }
+        else { Rules.showFinal(S); tellAll(room, { type: "event", name: "final" }); }
+      } else { return; }
+      broadcast(room);
+      return;
+    }
+
+    // ----- let go of the spring: the only thing the client sends is how far along the top the ball starts -----
+    if (message.type === "release") {
+      if (!mine || S.state !== "playing" || S.ballsLeft <= 0 || room.board.hasBall()) return;
+      const power = Math.min(1, Math.max(0, Number(message.power) || 0));    // never trust the number: force it into 0..1
+      room.board.launch(power);
+      room.reshuffleUsed = false;
+      room.lastTick = Date.now(); room.bank = 0;
+      tellAll(room, { type: "event", name: "release", power: power });
+      broadcast(room);
+      return;
+    }
+
+    if (message.type === "tilt") {
+      if (!mine) return;
+      const t = Rules.useTilt(S, room.board.isRolling());       // the rulebook checks the rules and picks the direction and strength
+      if (!t.ok) { if (t.reason) fail(socket, t.reason); return; }
+      room.board.nudge(t.direction * t.strength);
+      tellAll(room, { type: "event", name: "tilt" });
+      broadcast(room);
+      return;
+    }
+
+    if (message.type === "shuffle") {
+      if (!mine || S.state !== "playing" || room.board.isRolling() || room.reshuffleUsed) return;
+      room.board.setCups(room.board.newLayout());
+      room.reshuffleUsed = true;
+      tellAll(room, { type: "event", name: "shuffle" });
+      broadcast(room);
+      return;
+    }
+
+    if (message.type === "cashout") {
+      // Allowed before inserting, after a game, or even mid-game between balls (the bet is already in the kitty, so it is forfeited).
+      if (!mine || (S.state !== "idle" && S.state !== "result" && S.state !== "playing")) return;
+      if (room.board.isRolling()) return;                      // wait for the ball to land
+      room.board.clear();
+      if (Rules.leaveTable(S).action === "left") { broadcast(room); }
       return;
     }
 

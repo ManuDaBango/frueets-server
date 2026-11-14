@@ -1,17 +1,21 @@
-# Game of Frueets: the server (Step 13a: rooms and the lobby)
+# Game of Frueets: the server (Step 13b: the ball on the server)
 
 This is a small Node server. It now has **rooms**: a host opens a room, gets a 4-letter code, friends join with the code, and the host starts the game (the server then creates it with `engine.js`, the rulebook). Anyone whose connection drops can come back to the same seat using the secret ticket (token) their browser kept.
 
-Not yet: the ball. That is the next step.
+**New in 13b:** the server now runs the ball physics (`board.js`, using Matter.js). The player whose turn it is sends one number (how far they pulled the spring) and the server drops the ball, streams its position to everyone 60 times a second, and tells the rulebook where it landed. One referee, everyone watches the same ball.
+
+The server is tested but still has no pretty screen: that is Step 14, when the game page connects to it.
 
 ## The files, and how to read them (in this order)
 
 | File | What it is | Analogy |
 |---|---|---|
 | `engine.js` | The rules: bets, kitty, prizes, turns, tilt, settle-up. No screen, no sound. | The rulebook in the box |
+| `board.js` | The table: pegs, walls, cups, the ball, Matter.js physics. No pictures. | The table itself |
 | `server.js` | Opens the doors, listens, answers. Uses `engine.js`. | The kitchen |
 | `package.json` | The shopping list (`ws`) and the command to start (`npm start`). | The recipe card header |
 | `package-lock.json` | The exact versions bought, so every computer gets the same. | The receipt |
+| `game.test.js` | Plays a full game through the server with fake players. | A dress rehearsal |
 | `rooms.test.js` | Starts the server and tests rooms with fake players. | A rehearsal before opening night |
 | `.gitignore` | Tells Git not to upload `node_modules`. | "Don't pack the groceries" |
 
@@ -24,7 +28,7 @@ Read `server.js` top to bottom. Every part is commented. The four ideas in it:
 ## Try the rooms
 Open the server's address (your Render address, or http://localhost:3000) in **two browser tabs**. Tab 1: type a name, press **Create room**. Tab 2: type another name, press **Join** (the code is already filled in, because both tabs share the same browser). Then press **Start** in tab 1. The log shows exactly what the server sends everyone.
 
-To run the automatic tests: `node rooms.test.js` (17 checks).
+To run the automatic tests: `node rooms.test.js` (17 checks) and `node game.test.js` (25 checks: a whole game with fake players and real physics, takes about 30 seconds).
 
 ## Try it on your own computer first
 
@@ -53,5 +57,5 @@ Render runs your server on a computer in a data centre and gives it a web addres
 Why `process.env.PORT`? Render decides which door your server must use and tells it through that setting. `server.js` reads it and falls back to 3000 on your own computer.
 
 ## What comes next
-- **Step 13b:** the physics on the server, so everyone sees the same ball, and turns.
+- **Step 13c:** turn timers and skipping (45 seconds idle, 20 seconds disconnected, host can skip), chat and emoji reactions.
 - **Step 14:** the game page connects to this server, and the join links `www.alt108.com/frueets/?room=KQWM` start working.
