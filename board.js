@@ -33,7 +33,7 @@
   const STEP_MS = 1000 / 60;        // how much game time one physics step covers
   // GAME SPEED: how many times faster than a 60-steps-a-second clock the game runs. The game page runs at this speed too (see GAME_SPEED
   // in the page), so a ball falls at the same pace online and offline. 2.4 is what a 144 Hz laptop screen gave the first versions.
-  const GAME_SPEED = 2.4;
+  const GAME_SPEED = 2.0;
   // Thirteen cups, as in the first versions of the game. The width follows the prize a little: the Bell and the Star are narrower.
   // Only the proportions matter (the cups are stretched to fill the board).
   const CUP_RECIPE = [
