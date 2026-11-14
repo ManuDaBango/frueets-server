@@ -63,6 +63,7 @@ const PORT = process.env.PORT || 3000;
 const IDLE_MS = Number(process.env.IDLE_MS) || 45000;   // someone is connected but does nothing
 const GONE_MS = Number(process.env.GONE_MS) || 20000;   // the player's phone is disconnected
 const REACTIONS = ["\u{1F44F}", "\u{1F602}", "\u{1F62E}", "\u{1F525}", "\u{1F62D}", "\u{1F389}", "\u{1F440}", "\u2764\uFE0F"];   // the allowed reactions
+const SERVER_VERSION = "14c";                          // shown at /health and sent to the page, so the page can tell if the server is out of date
 const CHAT_KEEP = 30;                                   // how many chat lines a room remembers for people who join late
 
 // ---------- 1. HTTP: the front page and the health check ----------
@@ -104,7 +105,7 @@ const httpServer = http.createServer(function (request, response) {
   if (request.url === "/health") {
     // Render pings this address now and then to check we are alive.
     response.writeHead(200, { "Content-Type": "text/plain" });
-    response.end("ok");
+    response.end("ok " + SERVER_VERSION);
   } else {
     response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
     response.end(TEST_PAGE);
@@ -315,7 +316,7 @@ wss.on("connection", function (socket) {
         old.socket = socket; old.connected = true;
         socket.room = room; socket.member = old;
         fixHost(room);
-        send(socket, { type: "joined", code: room.code, token: old.token, name: old.name, host: old.host });
+        send(socket, { type: "joined", version: SERVER_VERSION, code: room.code, token: old.token, name: old.name, host: old.host });
         send(socket, { type: "chatHistory", messages: room.chat });
         if (room.S && Rules.me(room.S).name === old.name) { arm(room); }   // the person whose turn it is is back: fresh time
         broadcast(room);
@@ -330,7 +331,7 @@ wss.on("connection", function (socket) {
         ghost.socket = socket; ghost.connected = true;
         socket.room = room; socket.member = ghost;
         fixHost(room);
-        send(socket, { type: "joined", code: room.code, token: ghost.token, name: ghost.name, host: ghost.host });
+        send(socket, { type: "joined", version: SERVER_VERSION, code: room.code, token: ghost.token, name: ghost.name, host: ghost.host });
         send(socket, { type: "chatHistory", messages: room.chat });
         if (room.S && Rules.me(room.S).name === ghost.name) { arm(room); }
         broadcast(room);
@@ -507,7 +508,7 @@ function seat(socket, room, name, isHost) {
   room.members.push(member);
   socket.room = room;
   socket.member = member;
-  send(socket, { type: "joined", code: room.code, token: member.token, name: name, host: isHost });   // only they get the token
+  send(socket, { type: "joined", version: SERVER_VERSION, code: room.code, token: member.token, name: name, host: isHost });   // only they get the token
   send(socket, { type: "chatHistory", messages: room.chat });
   fixHost(room);                                  // CHANGED IN 14b: if nobody connected is host (e.g. the host's phone went to sleep), the newcomer becomes host
   broadcast(room);
