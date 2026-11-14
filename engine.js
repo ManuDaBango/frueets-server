@@ -40,17 +40,24 @@
   const BET_MAX            = 5;    // biggest bet for one game
   const JACKPOT_MULTIPLIER = 50;   // three Stars pays this many times your bet, never more than the kitty holds
   const TILT_EVERY_GAMES   = 3;    // a player may use Tilt once in this many of their own games
-  const TILT_SMALL         = 1.6;  // sideways nudge for a small tilt
-  const TILT_LARGE         = 3.6;  // sideways nudge for a large tilt
+  // CHANGED IN 14a: the tilt is about 3 times stronger (it was 1.6 and 3.6, which hardly moved the ball). Measured with the real physics:
+  // pressed after the last pegs a small tilt moves the landing spot about 2 cups sideways, a large one about 3 to 4 cups. Pressed early,
+  // among the pegs, the pegs scramble the ball again, so the result is unpredictable. (Speed added to the ball, in pixels per step.)
+  const TILT_SMALL         = 4.5;  // sideways nudge for a small tilt
+  const TILT_LARGE         = 9;    // sideways nudge for a large tilt
   const BALLS_PER_GAME     = 3;    // balls in one game
   const MAX_PLAYERS        = 5;    // most players at one table
   const SOUND_BIG_WIN_AT   = 12;   // a prize of this many dollars or more counts as "big" (picks the jingle)
   const KEEP_TURN_MIN_PAYOUT = 1;  // a game paying at least this many dollars keeps the turn. 9999 switches the rule off.
 
   // Prizes for a $1 bet. The real prize is the number x your bet (a $3 bet pays 3x).
-  const PAYOUT_THREE     = { Cherry: 4, Peach: 6, Pineapple: 12, Lemon: 24 };   // three of a kind
-  const PAYOUT_WITH_STAR = { Cherry: 3, Peach: 5, Pineapple: 9,  Lemon: 18 };   // two of a kind + one Star
-  const PAYOUT_TWO_STARS = { Cherry: 2, Peach: 3, Pineapple: 6,  Lemon: 12 };   // two Stars + one fruit
+  // CHANGED IN 14a: the Bell is back (it is the best fruit), and the prizes for combinations that use the wild Star are about
+  // half of what they were. WHY: with 13 cups, a player who aims at the Star hits it about 1 ball in 6, and the old wild prizes returned
+  // them $1.70 for every $1 bet, so the kitty would empty in no time. Now a player aiming at the Star gets back about $1.20 per $1
+  // (skill pays, a little), and one who pulls at random about $0.62. (The old numbers are in the comments in case you want them back.)
+  const PAYOUT_THREE     = { Cherry: 4, Peach: 6, Pineapple: 12, Lemon: 24, Bell: 36 };    // three of a kind
+  const PAYOUT_WITH_STAR = { Cherry: 2, Peach: 3, Pineapple: 5,  Lemon: 10, Bell: 15 };    // two of a kind + one Star   (was 3, 5, 9, 18)
+  const PAYOUT_TWO_STARS = { Cherry: 1, Peach: 2, Pineapple: 3,  Lemon: 6,  Bell: 9  };    // two Stars + one fruit     (was 2, 3, 6, 12)
   // Three Stars is the JACKPOT: JACKPOT_MULTIPLIER x your bet, capped at what the kitty holds.
 
   // ------------------------------------------------------------------------
@@ -274,6 +281,18 @@
     return { action: "left", forfeited: forfeited, net: forfeited ? -who.lastBet : 0 };
   }
 
+  // SKIPPING a player who is away or too slow. Unlike leaving, a skipped player STAYS in the rotation (their seat and money
+  // are kept) and gets their turn again when it comes round. If they were in the middle of a game, that game is forfeited:
+  // the bet is already in the kitty, so it stays there. Returns { ok: false } if there is nobody to hand the turn to.
+  function skipTurn(S) {
+    if (S.state === "home" || S.state === "gameover" || S.state === "final") { return { ok: false }; }
+    if (activePlayers(S).length <= 1) { return { ok: false }; }
+    const who = me(S);
+    const forfeited = (S.state === "playing");
+    advanceTurn(S);
+    return { ok: true, name: who.name, forfeited: forfeited };
+  }
+
   // ------------------------------------------------------------------------
   // TILT (once every TILT_EVERY_GAMES of a player's own games)
   // ------------------------------------------------------------------------
@@ -326,6 +345,6 @@
     emptySession: emptySession, newSession: newSession, me: me, activePlayers: activePlayers,
     nextActiveIndex: nextActiveIndex, clampBet: clampBet, changeBet: changeBet, startGame: startGame,
     evaluateGame: evaluateGame, ballLanded: ballLanded, advanceTurn: advanceTurn, showFinal: showFinal,
-    leaveTable: leaveTable, canTilt: canTilt, useTilt: useTilt, settle: settle, plural: plural
+    leaveTable: leaveTable, skipTurn: skipTurn, canTilt: canTilt, useTilt: useTilt, settle: settle, plural: plural
   };
 }));

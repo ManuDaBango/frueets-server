@@ -30,14 +30,19 @@
   const LAUNCH_WOBBLE = 6;          // random sideways wobble at launch, in pixels
   const CUP_HEIGHT = 80, DIVIDER_WIDTH = 4;
   const WALL_PEGS_REMOVED_AT_BOTTOM = 0;
-  const STEP_MS = 1000 / 60;
-  // Nine cups. The width follows the prize: only the proportions matter.
+  const STEP_MS = 1000 / 60;        // how much game time one physics step covers
+  // GAME SPEED: how many times faster than a 60-steps-a-second clock the game runs. The game page runs at this speed too (see GAME_SPEED
+  // in the page), so a ball falls at the same pace online and offline. 2.4 is what a 144 Hz laptop screen gave the first versions.
+  const GAME_SPEED = 2.4;
+  // Thirteen cups, as in the first versions of the game. The width follows the prize a little: the Bell and the Star are narrower.
+  // Only the proportions matter (the cups are stretched to fill the board).
   const CUP_RECIPE = [
-    { fruit: "Cherry",    count: 3, width: 60 },
-    { fruit: "Peach",     count: 2, width: 56 },
-    { fruit: "Pineapple", count: 2, width: 32 },
-    { fruit: "Lemon",     count: 1, width: 28 },
-    { fruit: "Star",      count: 1, width: 24 }
+    { fruit: "Cherry",    count: 3, width: 34 },
+    { fruit: "Peach",     count: 3, width: 34 },
+    { fruit: "Pineapple", count: 2, width: 34 },
+    { fruit: "Lemon",     count: 2, width: 34 },
+    { fruit: "Star",      count: 1, width: 30 },
+    { fruit: "Bell",      count: 2, width: 28 }
   ];
 
   // Where the pegs are. (The page and the server both need this: the server for physics, the page to draw them.)
@@ -163,7 +168,7 @@
 
   return {
     BOARD_WIDTH: BOARD_WIDTH, BOARD_HEIGHT: BOARD_HEIGHT, PEG_RADIUS: PEG_RADIUS, BALL_RADIUS: BALL_RADIUS,
-    CUP_HEIGHT: CUP_HEIGHT, DIVIDER_WIDTH: DIVIDER_WIDTH, STEP_MS: STEP_MS, CUP_RECIPE: CUP_RECIPE,
+    CUP_HEIGHT: CUP_HEIGHT, DIVIDER_WIDTH: DIVIDER_WIDTH, STEP_MS: STEP_MS, GAME_SPEED: GAME_SPEED, CUP_RECIPE: CUP_RECIPE,
     pegPositions: pegPositions, powerToX: powerToX, newLayout: newLayout, createBoard: createBoard
   };
 }));

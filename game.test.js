@@ -23,7 +23,7 @@ async function until(fn, ms) { const t = Date.now(); while (Date.now() - t < ms)
   const B = await client(); B.say({ type: "join", code, name: "Ben" }); await wait(150);
   A.say({ type: "start" }); await wait(150);
   const room0 = A.last("room");
-  check("cups are sent to everyone: 9 cups filling the board", room0.cups && room0.cups.length === 9 && Math.abs(room0.cups[8].right - 400) < 0.01, room0.cups && room0.cups.length);
+  check("cups are sent to everyone: 13 cups filling the board", room0.cups && room0.cups.length === 13 && Math.abs(room0.cups[12].right - 400) < 0.01, room0.cups && room0.cups.length);
   const total = (r) => r.session.table.players.reduce((s, p) => s + p.balance, 0) + r.session.table.kitty;
   const START = total(room0);
 

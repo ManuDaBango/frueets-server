@@ -1,5 +1,5 @@
 /* ============================================================================
-   server.js  -  STEP 13b: THE BALL (physics on the server)
+   server.js  -  STEP 13c: TURN TIMERS, SKIPPING, CHAT AND REACTIONS
    ============================================================================
    NEW IN THIS STEP (on top of the tiny server of Step 12):
      * ROOMS. A room is one table of friends. It has a 4-letter code (like KQWM). ANALOGY: a hotel with many
@@ -15,6 +15,17 @@
    (engine.js), which pays the prize. ANALOGY: one referee rolls the dice in the middle of the table; everyone watches the same roll.
    Because the server decides everything, nobody can cheat by changing their own copy of the game.
 
+   NEW IN 13c: PEOPLE ARE HUMAN. Friends get distracted, phones drop, someone goes to make tea.
+     * TURN TIMER. If the player whose turn it is does nothing for IDLE_MS (45 seconds), the server SKIPS them. If their
+       phone is disconnected it only waits GONE_MS (20 seconds). A skipped player is not removed: they keep their seat and
+       money and get their turn again when it comes round. (The timer pauses while a ball is rolling.)
+     * HOST SKIP. The host can skip anyone at any time, so nobody has to sit and wait.
+     * CHAT and REACTIONS. A short text chat, and emoji reactions that float up on everyone's screen. Spectators (people who
+       ran out of money) are still in the room, so they can chat and react. There is no voice: use a WhatsApp/FaceTime call.
+     SAFETY NOTES: the server never trusts what clients send. Chat text is cut to 140 characters and stripped of odd
+     characters, messages are rate-limited (so nobody can flood the room), and a reaction must be on the allowed list.
+     The page must show chat with textContent (never innerHTML) so nobody can sneak in code.
+
    MESSAGES THE CLIENT CAN SEND (all JSON, always with a "type"):
      { type: "create", name }                     open a new room, you are the host
      { type: "join", code, name, token? }         join (or rejoin, if you pass your old token)
@@ -24,13 +35,18 @@
      { type: "release", power: 0..1 }             let go of the spring: drops the ball (your turn, game in progress)
      { type: "tilt" }                             nudge the rolling ball (your turn; rules decide if it is allowed)
      { type: "shuffle" }                          rearrange the cups between balls (once per ball)
+     { type: "skip" }                             host only: skip the player whose turn it is (when no ball is rolling)
+     { type: "chat", text }                       say something (140 characters at most)
+     { type: "react", emoji }                     send a floating emoji (must be on the allowed list, REACTIONS below)
      { type: "cashout" }                          leave the game and keep your money; mid-game the bet is forfeited (your turn, ball not rolling)
      { type: "leave" }                            leave the room
    MESSAGES THE SERVER SENDS BACK:
      { type: "joined", code, token, name, host }  once, just for you: keep the token!
-     { type: "room", code, started, members, session, cups, rolling }   to everyone, whenever anything changes
+     { type: "room", code, started, members, session, cups, rolling, turnMsLeft }   to everyone, whenever anything changes
      { type: "ball", x, y }                       60 times a second while a ball is moving (x is null when it disappears)
-     { type: "event", name, ... }                 things to play a sound for: insert, release, landed, tilt, shuffle, pass, final
+     { type: "event", name, ... }                 things to play a sound for: insert, release, landed, tilt, shuffle, pass, final, skipped
+     { type: "chat", name, text, t }              someone said something        { type: "chatHistory", messages } the last few, when you join
+     { type: "react", name, emoji }               someone sent a reaction
      { type: "error", message }
    ============================================================================ */
 
@@ -42,6 +58,12 @@ const Board = require("./board.js");        // OUR table: pegs, cups and the bal
 
 // The door to knock on. On Render, process.env.PORT is set for us. On your own computer there is none, so we use 3000.
 const PORT = process.env.PORT || 3000;
+
+// How long before a quiet player is skipped. (The tests set shorter times through these environment settings.)
+const IDLE_MS = Number(process.env.IDLE_MS) || 45000;   // someone is connected but does nothing
+const GONE_MS = Number(process.env.GONE_MS) || 20000;   // the player's phone is disconnected
+const REACTIONS = ["\u{1F44F}", "\u{1F602}", "\u{1F62E}", "\u{1F525}", "\u{1F62D}", "\u{1F389}", "\u{1F440}", "\u2764\uFE0F"];   // the allowed reactions
+const CHAT_KEEP = 30;                                   // how many chat lines a room remembers for people who join late
 
 // ---------- 1. HTTP: the front page and the health check ----------
 const TEST_PAGE = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -92,7 +114,7 @@ const httpServer = http.createServer(function (request, response) {
 // ---------- 2. ROOMS ----------
 // "rooms" is the hotel's register: room code -> room.
 //   room = { code, members: [ { token, name, socket, connected, host } ], S: the game rules state (or null until Start),
-//            board: the physics table, reshuffleUsed, bank + lastTick (the physics clock), lastActive }
+//            board: the physics table, deadline (when the current player gets skipped), chat (recent lines), reshuffleUsed, bank + lastTick (the physics clock), lastActive }
 const rooms = new Map();
 
 // Letters that can't be mistaken for each other when read out loud or typed on a phone (no I, no O).
@@ -119,7 +141,8 @@ function roomView(room) {
     members: room.members.map(function (m) { return { name: m.name, connected: m.connected, host: m.host }; }),
     session: room.S,
     cups: room.board ? room.board.getCups() : null,           // where each fruit's cup is (left and right edge, in board pixels)
-    rolling: room.board ? room.board.isRolling() : false
+    rolling: room.board ? room.board.isRolling() : false,
+    turnMsLeft: turnTimerRunning(room) ? Math.max(0, room.deadline - Date.now()) : null      // clients count down from this
   };
 }
 
@@ -140,6 +163,43 @@ function fixHost(room) {
   if (next) { next.host = true; }
 }
 
+// ---------- THE TURN TIMER ----------
+// Is the clock running for the current player? Only while the game waits for THEM: not before the game starts, not while a
+// ball is rolling, and not once everyone is finished.
+function turnTimerRunning(room) {
+  const S = room.S;
+  if (!S || room.board.hasBall()) return false;
+  return S.state === "idle" || S.state === "result" || S.state === "playing" || S.state === "gameover";
+}
+
+// (Re)start the clock for whoever's turn it is now. A disconnected player gets the shorter time.
+function arm(room) {
+  if (!room.S) return;
+  const current = room.members.find(function (m) { return m.name === Rules.me(room.S).name; });
+  const away = !current || !current.connected || room.S.state === "gameover";     // gameover moves on by itself soon too
+  room.deadline = Date.now() + (away ? GONE_MS : IDLE_MS);
+}
+
+// Skip the current player: the rulebook hands the turn on and says whether a game was forfeited.
+function skipCurrent(room, why) {
+  const result = Rules.skipTurn(room.S);
+  if (!result.ok) { arm(room); return false; }          // nobody to hand the turn to (a single player): just keep waiting
+  room.board.clear();
+  tellAll(room, { type: "event", name: "skipped", player: result.name, forfeited: result.forfeited, why: why });
+  arm(room);
+  broadcast(room);
+  return true;
+}
+
+// When the current player's game is over (out of money / cashed out), move on to the next player or the settle-up.
+function moveOnFromGameOver(room) {
+  const S = room.S;
+  if (Rules.activePlayers(S).length > 0) { Rules.advanceTurn(S); tellAll(room, { type: "event", name: "pass" }); }
+  else { Rules.showFinal(S); tellAll(room, { type: "event", name: "final" }); }
+  arm(room);
+  broadcast(room);
+}
+
 // Send one message to everyone in the room.
 function tellAll(room, object) {
   for (const m of room.members) { if (m.connected) { send(m.socket, object); } }
@@ -158,11 +218,15 @@ const TICK_MS = 10;
 setInterval(function () {
   const now = Date.now();
   for (const room of rooms.values()) {
+    // Out of patience? (Skip the player, or, after a "game over", move on to the next player.)
+    if (room.S && turnTimerRunning(room) && now > room.deadline) {
+      if (room.S.state === "gameover") { moveOnFromGameOver(room); } else { skipCurrent(room, "timer"); }
+    }
     if (!room.board || !room.board.hasBall()) { room.bank = 0; room.lastTick = now; continue; }
-    room.bank += Math.min(now - room.lastTick, 100);          // never catch up more than 0.1 s in one go
+    room.bank += Math.min(now - room.lastTick, 100) * Board.GAME_SPEED;   // game time passes GAME_SPEED times faster than real time; never catch up more than 0.1 s of real time at once
     room.lastTick = now;
     let steps = 0;
-    while (room.bank >= Board.STEP_MS && steps < 5 && room.board.hasBall()) {
+    while (room.bank >= Board.STEP_MS && steps < 12 && room.board.hasBall()) {
       const events = room.board.step();
       room.bank -= Board.STEP_MS;
       steps++;
@@ -178,6 +242,7 @@ function onBoardEvent(room, e) {
   if (e.type === "landed") {
     const result = Rules.ballLanded(room.S, e.fruit);         // the rulebook counts the ball and, on the last one, pays the prize
     tellAll(room, { type: "event", name: "landed", fruit: e.fruit, cup: e.cup, finished: result.finished });
+    arm(room);                                                // the clock starts again once the ball has landed
     broadcast(room);
   }
   // "cleared" needs no action: the next tick sends { type: "ball", x: null } and everyone's ball disappears.
@@ -205,7 +270,7 @@ wss.on("connection", function (socket) {
     if (message.type === "create") {
       if (socket.room) return fail(socket, "You are already in a room");
       const name = cleanName(message.name) || "Player 1";
-      const room = { code: makeRoomCode(), members: [], S: null, board: null, reshuffleUsed: false, bank: 0, lastTick: Date.now(), lastActive: Date.now() };
+      const room = { code: makeRoomCode(), members: [], S: null, board: null, reshuffleUsed: false, deadline: 0, chat: [], bank: 0, lastTick: Date.now(), lastActive: Date.now() };
       rooms.set(room.code, room);
       seat(socket, room, name, true);
       return;
@@ -225,6 +290,8 @@ wss.on("connection", function (socket) {
         socket.room = room; socket.member = old;
         fixHost(room);
         send(socket, { type: "joined", code: room.code, token: old.token, name: old.name, host: old.host });
+        send(socket, { type: "chatHistory", messages: room.chat });
+        if (room.S && Rules.me(room.S).name === old.name) { arm(room); }   // the person whose turn it is is back: fresh time
         broadcast(room);
         return;
       }
@@ -250,6 +317,7 @@ wss.on("connection", function (socket) {
       room.S = Rules.newSession(names);           // the rulebook seats everyone, in joining order
       room.board = Board.createBoard();           // and the table is built
       room.board.setCups(room.board.newLayout());
+      arm(room);
       broadcast(room);
       return;
     }
@@ -260,7 +328,28 @@ wss.on("connection", function (socket) {
       if (!S || (S.state !== "idle" && S.state !== "result")) return;
       if (Rules.me(S).name !== socket.member.name) return;       // not your turn
       const step = message.step > 0 ? 1 : -1;
-      if (Rules.changeBet(S, step)) { broadcast(room); }
+      if (Rules.changeBet(S, step)) { arm(room); broadcast(room); }
+      return;
+    }
+
+    // ----- chat (anyone in the room, including spectators) -----
+    if (message.type === "chat") {
+      if (tooFast(socket, "chat", 700, 5, 5000)) return;       // at most 5 lines per 5 seconds, 0.7 s apart
+      const text = String(message.text || "").replace(/[\u0000-\u001f\u007f<>]/g, "").trim().slice(0, 140);
+      if (text === "") return;
+      const line = { type: "chat", name: socket.member.name, text: text, t: Date.now() };
+      room.chat.push(line);
+      if (room.chat.length > CHAT_KEEP) { room.chat.shift(); }
+      tellAll(room, line);
+      room.lastActive = Date.now();
+      return;
+    }
+
+    // ----- a floating reaction -----
+    if (message.type === "react") {
+      if (REACTIONS.indexOf(message.emoji) === -1) return;     // only the allowed list
+      if (tooFast(socket, "react", 300, 8, 5000)) return;
+      tellAll(room, { type: "react", name: socket.member.name, emoji: message.emoji });
       return;
     }
 
@@ -286,6 +375,7 @@ wss.on("connection", function (socket) {
         if (Rules.activePlayers(S).length > 0) { Rules.advanceTurn(S); tellAll(room, { type: "event", name: "pass" }); }
         else { Rules.showFinal(S); tellAll(room, { type: "event", name: "final" }); }
       } else { return; }
+      arm(room);
       broadcast(room);
       return;
     }
@@ -307,7 +397,8 @@ wss.on("connection", function (socket) {
       const t = Rules.useTilt(S, room.board.isRolling());       // the rulebook checks the rules and picks the direction and strength
       if (!t.ok) { if (t.reason) fail(socket, t.reason); return; }
       room.board.nudge(t.direction * t.strength);
-      tellAll(room, { type: "event", name: "tilt" });
+      tellAll(room, { type: "event", name: "tilt", direction: t.direction, strength: t.strength });   // the screens tilt the same way
+      arm(room);
       broadcast(room);
       return;
     }
@@ -317,7 +408,17 @@ wss.on("connection", function (socket) {
       room.board.setCups(room.board.newLayout());
       room.reshuffleUsed = true;
       tellAll(room, { type: "event", name: "shuffle" });
+      arm(room);
       broadcast(room);
+      return;
+    }
+
+    // ----- the host skips whoever's turn it is -----
+    if (message.type === "skip") {
+      if (!S || !socket.member.host) return;
+      if (S.state === "final" || room.board.isRolling()) return;
+      if (S.state === "gameover") { moveOnFromGameOver(room); return; }
+      skipCurrent(room, "host");
       return;
     }
 
@@ -326,7 +427,7 @@ wss.on("connection", function (socket) {
       if (!mine || (S.state !== "idle" && S.state !== "result" && S.state !== "playing")) return;
       if (room.board.isRolling()) return;                      // wait for the ball to land
       room.board.clear();
-      if (Rules.leaveTable(S).action === "left") { broadcast(room); }
+      if (Rules.leaveTable(S).action === "left") { arm(room); broadcast(room); }
       return;
     }
 
@@ -343,6 +444,7 @@ function seat(socket, room, name, isHost) {
   socket.room = room;
   socket.member = member;
   send(socket, { type: "joined", code: room.code, token: member.token, name: name, host: isHost });   // only they get the token
+  send(socket, { type: "chatHistory", messages: room.chat });
   broadcast(room);
   console.log("room " + room.code + ": " + name + " joined (" + room.members.length + " in room, " + rooms.size + " rooms open)");
 }
@@ -356,8 +458,21 @@ function dropMember(socket, onPurpose) {
   // Before the game starts, leaving takes you off the list. Once it has started, your seat is kept so you can rejoin.
   if (room.S === null) { room.members.splice(room.members.indexOf(member), 1); }
   fixHost(room);
+  if (room.S && Rules.me(room.S).name === member.name) { room.deadline = Math.min(room.deadline, Date.now() + GONE_MS); }   // a disconnected player gets less time
   broadcast(room);
   console.log("room " + room.code + ": " + member.name + " left");
+}
+
+// A little rate limiter. Remembers when each phone line last did 'kind' of thing and refuses if it is too soon or too often:
+// 'gap' = least milliseconds between two, 'max' per 'window' milliseconds. Returns true if this one should be IGNORED.
+function tooFast(socket, kind, gap, max, window) {
+  const now = Date.now();
+  socket.recent = socket.recent || {};
+  const times = (socket.recent[kind] = (socket.recent[kind] || []).filter(function (t) { return now - t < window; }));
+  if (times.length && now - times[times.length - 1] < gap) return true;
+  if (times.length >= max) return true;
+  times.push(now);
+  return false;
 }
 
 // A helper so we don't repeat ourselves: turn an object into JSON text and send it down one phone line.
