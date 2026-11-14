@@ -38,7 +38,7 @@
      { type: "skip" }                             host only: skip the player whose turn it is (when no ball is rolling)
      { type: "chat", text }                       say something (140 characters at most)
      { type: "react", emoji }                     send a floating emoji (must be on the allowed list, REACTIONS below)
-     { type: "cashout" }                          leave the game and keep your money; mid-game the bet is forfeited (your turn, ball not rolling)
+     { type: "cashout" }                          cash out any time: take your stack plus an equal share of the kitty now (a game in progress is forfeited)
      { type: "leave" }                            leave the room
    MESSAGES THE SERVER SENDS BACK:
      { type: "joined", code, token, name, host }  once, just for you: keep the token!
@@ -200,6 +200,30 @@ function moveOnFromGameOver(room) {
   broadcast(room);
 }
 
+// CHANGED IN 14b: nobody presses "pass to the next player" any more. After a game that does not keep the turn (or a game over), everyone sees
+// the result for RESULT_MS, then the turn moves on by itself. A winner who keeps the turn, or a lone player, still gets their button.
+const RESULT_MS = Number(process.env.RESULT_MS) || 2600;
+function autoPass(room, now) {
+  const S = room.S;
+  let need = false;
+  if (!room.board.hasBall()) {
+    if (S.state === "result" && !S.keepsTurn && Rules.activePlayers(S).length > 1) { need = true; }
+    if (S.state === "gameover") {
+      if (Rules.activePlayers(S).length > 0) { need = true; }
+      else if (Rules.poolPlayers(S).length === 0) { need = true; }          // everybody has cashed out: on to the settle-up
+    }
+  }
+  if (!need) { room.autoAt = null; return; }
+  if (!room.autoAt) { room.autoAt = now + RESULT_MS; return; }
+  if (now < room.autoAt) { return; }
+  room.autoAt = null;
+  if (S.state === "gameover") { moveOnFromGameOver(room); return; }
+  Rules.advanceTurn(S);
+  tellAll(room, { type: "event", name: "pass" });
+  arm(room);
+  broadcast(room);
+}
+
 // Send one message to everyone in the room.
 function tellAll(room, object) {
   for (const m of room.members) { if (m.connected) { send(m.socket, object); } }
@@ -215,6 +239,7 @@ function isTheirTurn(room, member) {
 // physics by that much, in equal 1/60-second steps (the same idea as the "fixed timestep" in the game page).
 // Then we send everyone the ball's new position.
 const TICK_MS = 10;
+const SPEED = Number(process.env.GAME_SPEED) || Board.GAME_SPEED;     // tests set GAME_SPEED to make balls fall faster; normally it is the board's setting
 setInterval(function () {
   const now = Date.now();
   for (const room of rooms.values()) {
@@ -222,8 +247,9 @@ setInterval(function () {
     if (room.S && turnTimerRunning(room) && now > room.deadline) {
       if (room.S.state === "gameover") { moveOnFromGameOver(room); } else { skipCurrent(room, "timer"); }
     }
+    if (room.S) { autoPass(room, now); }
     if (!room.board || !room.board.hasBall()) { room.bank = 0; room.lastTick = now; continue; }
-    room.bank += Math.min(now - room.lastTick, 100) * Board.GAME_SPEED;   // game time passes GAME_SPEED times faster than real time; never catch up more than 0.1 s of real time at once
+    room.bank += Math.min(now - room.lastTick, 100) * SPEED;   // game time passes GAME_SPEED times faster than real time; never catch up more than 0.1 s of real time at once
     room.lastTick = now;
     let steps = 0;
     while (room.bank >= Board.STEP_MS && steps < 12 && room.board.hasBall()) {
@@ -268,7 +294,7 @@ wss.on("connection", function (socket) {
 
     // ----- create a room -----
     if (message.type === "create") {
-      if (socket.room) return fail(socket, "You are already in a room");
+      if (socket.room) return fail(socket, "You are already in a game");
       const name = cleanName(message.name) || "Player 1";
       const room = { code: makeRoomCode(), members: [], S: null, board: null, reshuffleUsed: false, deadline: 0, chat: [], bank: 0, lastTick: Date.now(), lastActive: Date.now() };
       rooms.set(room.code, room);
@@ -278,9 +304,9 @@ wss.on("connection", function (socket) {
 
     // ----- join (or rejoin) a room -----
     if (message.type === "join") {
-      if (socket.room) return fail(socket, "You are already in a room");
+      if (socket.room) return fail(socket, "You are already in a game");
       const room = rooms.get(String(message.code || "").toUpperCase());
-      if (!room) return fail(socket, "No room with that code");
+      if (!room) return fail(socket, "No game with that code");
 
       // REJOIN: the right token means "this is the same person as before", so give them their old seat back.
       const old = room.members.find(function (m) { return message.token && m.token === message.token; });
@@ -296,8 +322,22 @@ wss.on("connection", function (socket) {
         return;
       }
 
-      if (room.S !== null) return fail(socket, "That game has already started. (To come back, use the same phone or browser you joined with.)");
-      if (room.members.length >= Rules.MAX_PLAYERS) return fail(socket, "That room is full");
+      // CHANGED IN 14b: typing the name of someone who is AWAY takes over their seat (you moved to another phone or browser).
+      const typed = cleanName(message.name).toLowerCase();
+      const ghost = typed === "" ? null : room.members.find(function (m) { return !m.connected && m.name.toLowerCase() === typed; });
+      if (ghost) {
+        ghost.token = crypto.randomBytes(12).toString("hex");             // a fresh secret: the old phone can no longer use the seat
+        ghost.socket = socket; ghost.connected = true;
+        socket.room = room; socket.member = ghost;
+        fixHost(room);
+        send(socket, { type: "joined", code: room.code, token: ghost.token, name: ghost.name, host: ghost.host });
+        send(socket, { type: "chatHistory", messages: room.chat });
+        if (room.S && Rules.me(room.S).name === ghost.name) { arm(room); }
+        broadcast(room);
+        return;
+      }
+      if (room.S !== null) return fail(socket, "That game has already started. (To come back, type the same name you used before.)");
+      if (room.members.length >= Rules.MAX_PLAYERS) return fail(socket, "That game is full");
       let name = cleanName(message.name) || "Player " + (room.members.length + 1);
       let unique = name, n = 2;
       while (room.members.some(function (m) { return m.name.toLowerCase() === unique.toLowerCase(); })) { unique = name + " " + n; n++; }
@@ -313,6 +353,7 @@ wss.on("connection", function (socket) {
     if (message.type === "start") {
       if (!socket.member.host) return fail(socket, "Only the host can start");
       if (room.S !== null) return;
+      room.members = room.members.filter(function (m) { return m.connected; });      // CHANGED IN 14b: people who are away are not seated
       const names = room.members.map(function (m) { return m.name; });
       room.S = Rules.newSession(names);           // the rulebook seats everyone, in joining order
       room.board = Board.createBoard();           // and the table is built
@@ -422,12 +463,35 @@ wss.on("connection", function (socket) {
       return;
     }
 
+    // CHANGED IN 14b: anyone can cash out at any time (not just on their turn). They take their stack plus an equal share of the kitty
+    // right now. Only a ball that is still rolling for the current player makes them wait.
     if (message.type === "cashout") {
-      // Allowed before inserting, after a game, or even mid-game between balls (the bet is already in the kitty, so it is forfeited).
-      if (!mine || (S.state !== "idle" && S.state !== "result" && S.state !== "playing")) return;
-      if (room.board.isRolling()) return;                      // wait for the ball to land
-      room.board.clear();
-      if (Rules.leaveTable(S).action === "left") { arm(room); broadcast(room); }
+      if (!S) return;
+      const index = S.table.players.findIndex(function (p) { return p.name === socket.member.name; });
+      if (index < 0) return;
+      if (index === S.table.current && room.board.isRolling()) return;
+      if (index === S.table.current) { room.board.clear(); }
+      const r = Rules.cashOut(S, index);
+      if (!r.ok) return;
+      tellAll(room, { type: "event", name: "cashout", player: socket.member.name, takeHome: r.takeHome, net: r.net });
+      arm(room); broadcast(room);
+      return;
+    }
+
+    // A player with no money asks the host for another stack. The host answers with "topUp".
+    if (message.type === "requestTopUp") {
+      if (!S) return;
+      const index = S.table.players.findIndex(function (p) { return p.name === socket.member.name; });
+      if (index >= 0 && Rules.requestTopUp(S, index).ok) { tellAll(room, { type: "event", name: "topupAsked", player: socket.member.name }); broadcast(room); }
+      return;
+    }
+    // The host adds a stack of money for a player (with or without a request).
+    if (message.type === "topUp") {
+      if (!S || !socket.member.host) return;
+      const index = S.table.players.findIndex(function (p) { return p.name === String(message.name); });
+      if (index < 0 || !Rules.topUp(S, index).ok) return;
+      tellAll(room, { type: "event", name: "topup", player: S.table.players[index].name, amount: Rules.STARTING_BALANCE });
+      arm(room); broadcast(room);
       return;
     }
 
@@ -445,6 +509,7 @@ function seat(socket, room, name, isHost) {
   socket.member = member;
   send(socket, { type: "joined", code: room.code, token: member.token, name: name, host: isHost });   // only they get the token
   send(socket, { type: "chatHistory", messages: room.chat });
+  fixHost(room);                                  // CHANGED IN 14b: if nobody connected is host (e.g. the host's phone went to sleep), the newcomer becomes host
   broadcast(room);
   console.log("room " + room.code + ": " + name + " joined (" + room.members.length + " in room, " + rooms.size + " rooms open)");
 }
@@ -455,8 +520,9 @@ function dropMember(socket, onPurpose) {
   if (!room || !member || member.socket !== socket) return;
   socket.room = null; socket.member = null;
   member.connected = false;
-  // Before the game starts, leaving takes you off the list. Once it has started, your seat is kept so you can rejoin.
-  if (room.S === null) { room.members.splice(room.members.indexOf(member), 1); }
+  // CHANGED IN 14b: pressing Leave takes you off the list before the game starts. A line that merely DROPPED (a phone going to sleep)
+  // keeps its seat, shown as "away", so you can come back and still be host. Once the game has started the seat is always kept.
+  if (room.S === null && onPurpose) { room.members.splice(room.members.indexOf(member), 1); }
   fixHost(room);
   if (room.S && Rules.me(room.S).name === member.name) { room.deadline = Math.min(room.deadline, Date.now() + GONE_MS); }   // a disconnected player gets less time
   broadcast(room);

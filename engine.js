@@ -35,7 +35,11 @@
   // SETTINGS (money and rules). These are the numbers you can change to experiment.
   // ------------------------------------------------------------------------
   const STARTING_BALANCE   = 10;   // dollars each new player starts with (their "stack")
-  const KITTY_START        = 50;   // dollars in the kitty when the table opens (the jackpot reserve)
+  // CHANGED IN 14b: the kitty is now $20 for EVERY player (it used to be one $50 kitty shared out). So everyone buys in for
+  // STARTING_BALANCE + KITTY_PER_PLAYER = $30: $10 to play with and $20 into the shared kitty. A table of 2 opens with a $40 kitty, 5 with $100.
+  const KITTY_PER_PLAYER   = 20;
+  const KITTY_START        = KITTY_PER_PLAYER;   // one player's share; the page shows this on the home screen (the old name is kept)
+  const SETTLE_ROUND_CENTS = 10;   // settle-up payments are rounded to this many cents (the odd cents go to the biggest winner)
   const BET_MIN            = 1;    // smallest bet for one game
   const BET_MAX            = 5;    // biggest bet for one game
   const JACKPOT_MULTIPLIER = 50;   // three Stars pays this many times your bet, never more than the kitty holds
@@ -67,7 +71,7 @@
   function emptySession() {
     return {
       state: "home",
-      table: { players: [], current: 0, started: false, kitty: KITTY_START },
+      table: { players: [], current: 0, started: false, kitty: 0 },
       results: [], ballsLeft: 0, keepsTurn: false,
       lastOutcome: { label: "", payout: 0, net: 0, capped: false, wanted: 0 },
       outcomeKind: "none",
@@ -101,9 +105,15 @@
         lastBet: BET_MIN,            // what the game in progress (or just finished) was played at
         tiltWait: 0,                 // games to wait before Tilt is ready again (0 = ready)
         biggestWin: 0,
-        active: true                 // false once the player is out of the rotation
+        active: true,                // false once the player is out of the rotation (out of money, or cashed out)
+        putIn: STARTING_BALANCE + KITTY_PER_PLAYER,   // everything this player has paid in: grows by STARTING_BALANCE with each top-up
+        topUps: 0,                   // how many times the host has added a stack for this player
+        wantsTopUp: false,           // true while the player is asking the host for more money
+        cashedOut: false,            // true once the player has taken their money and left the pool
+        takeHome: 0                  // what they took when they cashed out (only meaningful if cashedOut)
       });
     }
+    S.table.kitty = KITTY_PER_PLAYER * S.table.players.length;     // $20 for each player who sits down
     S.state = "idle";
     return S;
   }
@@ -260,25 +270,71 @@
     S.state = "final";
   }
 
-  // The current player leaves the rotation ("End game" / "Leave table" / "Cash out").
+  // CASHING OUT (CHANGED IN 14b). A player may cash out at any time, on anyone's turn. They take their stack PLUS an equal share of
+  // the kitty as it is right now (like cashing in chips at a poker table), and leave the pool. Their result is locked in.
+  // The kitty shrinks by the share they took, so the players who stay keep their own shares.
+  // If it was this player's turn the game ends for them ("gameover" screen, then the turn moves on). A game in progress is forfeited:
+  // its bet is already in the kitty and stays there.
+  function poolPlayers(S) { return S.table.players.filter(function (p) { return !p.cashedOut; }); }
+
+  function cashOut(S, index) {
+    const who = S.table.players[index];
+    if (!who || who.cashedOut || S.state === "home" || S.state === "final") { return { ok: false }; }
+    const multi = S.table.players.length > 1;
+    const wasCurrent = (index === S.table.current);
+    const forfeited = wasCurrent && (S.state === "playing");
+    const share = S.table.kitty / poolPlayers(S).length;     // equal share among everyone still in the pool (this player included)
+    S.table.kitty = S.table.kitty - share;
+    who.takeHome = who.balance + share;
+    who.balance = 0;                                         // the money has left the table
+    who.cashedOut = true;
+    who.active = false;
+    who.wantsTopUp = false;
+    const net = who.takeHome - who.putIn;
+    if (wasCurrent) {
+      S.endInfo = {
+        title: multi ? "Cashed out" : "Game ended",
+        line2: (multi ? who.name + " cashes out" : "You cash out") + " with " + moneyText(who.takeHome),
+        note: forfeited ? "(The game in progress was forfeited)" : ""
+      };
+      S.keepsTurn = false;
+      S.state = "gameover";
+    }
+    return { ok: true, wasCurrent: wasCurrent, forfeited: forfeited, takeHome: who.takeHome, net: net };
+  }
+
+  // The current player leaves the rotation ("End game" / "Cash out"), used by the one-player game.
   // Returns { action: "none" }   nothing to do (already finished),
   //         { action: "home" }   nobody has put a coin in yet, so just go back to the home screen,
   //         { action: "left", forfeited: bool, net: dollars to put on the scoreboard (0 if nothing was forfeited) }.
   function leaveTable(S) {
     if (S.state === "home" || S.state === "gameover" || S.state === "final") { return { action: "none" }; }
     if (S.state === "idle" && !S.table.started) { return { action: "home" }; }
+    const lastBet = me(S).lastBet;
+    const r = cashOut(S, S.table.current);
+    if (!r.ok) { return { action: "none" }; }
+    return { action: "left", forfeited: r.forfeited, net: r.forfeited ? -lastBet : 0 };
+  }
 
-    const who = me(S);
-    const multi = S.table.players.length > 1;
-    const forfeited = (S.state === "playing");         // were we in the middle of a game? Its bet is already in the kitty, so it is lost.
-    who.active = false;
-    S.endInfo = {
-      title: multi ? "Left the table" : "Game ended",
-      line2: (multi ? who.name + " walks" : "You walk") + " away with " + moneyText(who.balance),
-      note: forfeited ? "(The game in progress was forfeited)" : ""
-    };
-    S.state = "gameover";
-    return { action: "left", forfeited: forfeited, net: forfeited ? -who.lastBet : 0 };
+  // TOP-UP: the host adds one more starting stack to a player (for example after a big bet lost them everything).
+  // It is new money from that player's pocket, so it is added to what they have paid in; the settle-up counts it.
+  function requestTopUp(S, index) {
+    const p = S.table.players[index];
+    if (!p || p.cashedOut || S.state === "final" || S.state === "home") { return { ok: false }; }
+    if (p.balance >= BET_MIN) { return { ok: false }; }          // only for someone who cannot afford a bet
+    p.wantsTopUp = true;
+    return { ok: true };
+  }
+  function topUp(S, index) {
+    const p = S.table.players[index];
+    if (!p || p.cashedOut || S.state === "final" || S.state === "home") { return { ok: false }; }
+    p.balance = p.balance + STARTING_BALANCE;
+    p.putIn = p.putIn + STARTING_BALANCE;
+    p.topUps = p.topUps + 1;
+    p.wantsTopUp = false;
+    p.active = true;                                             // back in the rotation
+    clampBet(p);
+    return { ok: true };
   }
 
   // SKIPPING a player who is away or too slow. Unlike leaving, a skipped player STAYS in the rotation (their seat and money
@@ -315,19 +371,42 @@
   }
 
   // ------------------------------------------------------------------------
-  // THE SETTLE-UP
+  // THE SETTLE-UP (CHANGED IN 14b)
   // ------------------------------------------------------------------------
-  // Everyone put in STARTING_BALANCE plus an equal share of the opening kitty. At the end the kitty that is left
-  // is shared equally, so each player takes home their stack plus their share. The nets add up to zero.
+  // Everyone paid in "putIn" ($10 stack + $20 for the kitty, plus any top-ups). A player who cashed out already took their
+  // money; everyone still in the pool takes their stack plus an equal share of what is left in the kitty.
+  // Each player's NET is what they take home minus what they paid in. The nets add up to zero, so the settle-up is just
+  // "who pays whom": the biggest loser pays the biggest winner, and so on, until everyone is square.
   function settle(S) {
-    const n = S.table.players.length;
-    const share = S.table.kitty / n;
-    const putIn = STARTING_BALANCE + KITTY_START / n;
+    const pool = poolPlayers(S);
+    const share = pool.length > 0 ? S.table.kitty / pool.length : 0;
     const rows = S.table.players.map(function (p) {
-      return { name: p.name, takeHome: p.balance + share, net: p.balance + share - putIn };
+      const takeHome = p.cashedOut ? p.takeHome : p.balance + share;
+      return { name: p.name, stack: p.cashedOut ? null : p.balance, cashedOut: p.cashedOut, topUps: p.topUps, putIn: p.putIn,
+               takeHome: takeHome, net: takeHome - p.putIn };
     });
-    rows.sort(function (a, b) { return b.takeHome - a.takeHome; });
-    return { share: share, putIn: putIn, kitty: S.table.kitty, rows: rows };
+    // work in whole cents, rounded to SETTLE_ROUND_CENTS; any leftover cents go to the biggest winner so the nets still add to zero
+    const cents = rows.map(function (r) { return Math.round(r.net * 100 / SETTLE_ROUND_CENTS) * SETTLE_ROUND_CENTS; });
+    let leftover = cents.reduce(function (t, c) { return t + c; }, 0);
+    if (leftover !== 0) {
+      let best = 0;
+      for (let i = 1; i < cents.length; i++) { if (cents[i] > cents[best]) { best = i; } }
+      cents[best] = cents[best] - leftover;
+    }
+    rows.forEach(function (r, i) { r.netRounded = cents[i] / 100; });
+    // who pays whom (greedy: biggest debtor pays biggest creditor)
+    const owe = cents.map(function (c, i) { return { i: i, c: c }; });
+    const payments = [];
+    for (let guard = 0; guard < 50; guard++) {
+      owe.sort(function (a, b) { return a.c - b.c; });
+      const debtor = owe[0], creditor = owe[owe.length - 1];
+      if (debtor.c >= 0 || creditor.c <= 0) { break; }
+      const amount = Math.min(-debtor.c, creditor.c);
+      payments.push({ from: rows[debtor.i].name, to: rows[creditor.i].name, amount: amount / 100 });
+      debtor.c += amount; creditor.c -= amount;
+    }
+    rows.sort(function (a, b) { return b.net - a.net; });
+    return { share: share, kitty: S.table.kitty, poolCount: pool.length, rows: rows, payments: payments };
   }
 
   // Dollars as text for the engine's own messages ("$8" or "$8.33"). The page has its own copy for the screen.
@@ -337,7 +416,7 @@
   }
 
   return {
-    STARTING_BALANCE: STARTING_BALANCE, KITTY_START: KITTY_START, BET_MIN: BET_MIN, BET_MAX: BET_MAX,
+    STARTING_BALANCE: STARTING_BALANCE, KITTY_START: KITTY_START, KITTY_PER_PLAYER: KITTY_PER_PLAYER, BET_MIN: BET_MIN, BET_MAX: BET_MAX,
     JACKPOT_MULTIPLIER: JACKPOT_MULTIPLIER, TILT_EVERY_GAMES: TILT_EVERY_GAMES, TILT_SMALL: TILT_SMALL,
     TILT_LARGE: TILT_LARGE, BALLS_PER_GAME: BALLS_PER_GAME, MAX_PLAYERS: MAX_PLAYERS,
     SOUND_BIG_WIN_AT: SOUND_BIG_WIN_AT, KEEP_TURN_MIN_PAYOUT: KEEP_TURN_MIN_PAYOUT,
@@ -345,6 +424,6 @@
     emptySession: emptySession, newSession: newSession, me: me, activePlayers: activePlayers,
     nextActiveIndex: nextActiveIndex, clampBet: clampBet, changeBet: changeBet, startGame: startGame,
     evaluateGame: evaluateGame, ballLanded: ballLanded, advanceTurn: advanceTurn, showFinal: showFinal,
-    leaveTable: leaveTable, skipTurn: skipTurn, canTilt: canTilt, useTilt: useTilt, settle: settle, plural: plural
+    leaveTable: leaveTable, cashOut: cashOut, poolPlayers: poolPlayers, topUp: topUp, requestTopUp: requestTopUp, skipTurn: skipTurn, canTilt: canTilt, useTilt: useTilt, settle: settle, plural: plural
   };
 }));

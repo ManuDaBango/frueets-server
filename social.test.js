@@ -52,12 +52,12 @@ const cur = (w) => { const s = w.last("room").session; return s.table.players[s.
   const mover = { Ann: A, Ben: B, Cy: C }[cur(A)];
   mover.say({ type: "primary" }); await wait(100);
   const st = A.last("room").session;
-  const total = (s) => s.table.players.reduce((x, p) => x + p.balance, 0) + s.table.kitty;
+  const total = (s) => s.table.players.reduce((x, p) => x + p.balance + (p.cashedOut ? p.takeHome : 0), 0) + s.table.kitty;
   check("game in progress", st.state === "playing");
   A.say({ type: "skip" }); await wait(100);
   const st2 = A.last("room").session;
   check("host skipped a player mid-game: next player idle, bet stays in the kitty", st2.state === "idle" && st2.table.kitty === st.table.kitty, [st2.state, st2.table.kitty, st.table.kitty]);
-  check("money conserved after the forfeit", total(st2) === 10 * 3 + 50, total(st2));
+  check("money conserved after the forfeit", total(st2) === 10 * 3 + 60, total(st2));
 
   console.log("E. disconnected players get skipped faster");
   // Let it settle to a known player, then disconnect Cy and wait for the turn to reach Cy.

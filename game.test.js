@@ -16,7 +16,7 @@ function client() {
 }
 async function until(fn, ms) { const t = Date.now(); while (Date.now() - t < ms) { if (fn()) return true; await wait(50); } return false; }
 (async () => {
-  const srv = spawn("node", ["server.js"], { env: { ...process.env, PORT: 3458 } });
+  const srv = spawn("node", ["server.js"], { env: { ...process.env, PORT: 3458, RESULT_MS: 1500 } });
   await wait(1000);
   const A = await client(); A.say({ type: "create", name: "Ann" }); await wait(150);
   const code = A.last("joined").code;
@@ -24,7 +24,7 @@ async function until(fn, ms) { const t = Date.now(); while (Date.now() - t < ms)
   A.say({ type: "start" }); await wait(150);
   const room0 = A.last("room");
   check("cups are sent to everyone: 13 cups filling the board", room0.cups && room0.cups.length === 13 && Math.abs(room0.cups[12].right - 400) < 0.01, room0.cups && room0.cups.length);
-  const total = (r) => r.session.table.players.reduce((s, p) => s + p.balance, 0) + r.session.table.kitty;
+  const total = (r) => r.session.table.players.reduce((s, p) => s + p.balance + (p.cashedOut ? p.takeHome : 0), 0) + r.session.table.kitty;
   const START = total(room0);
 
   B.say({ type: "release", power: 0.5 }); await wait(100);
@@ -35,7 +35,7 @@ async function until(fn, ms) { const t = Date.now(); while (Date.now() - t < ms)
   check("can't release before inserting", !A.last("ball"));
   A.say({ type: "primary" }); await wait(150);
   let r = A.last("room");
-  check("Ann inserts: game playing, bet in the kitty", r.session.state === "playing" && r.session.table.kitty === 51 && r.session.table.players[0].balance === 9, r.session.table);
+  check("Ann inserts: game playing, bet in the kitty", r.session.state === "playing" && r.session.table.kitty === 41 && r.session.table.players[0].balance === 9, r.session.table);
   check("both players got the insert event", A.all("event", "insert").length === 1 && B.all("event", "insert").length === 1);
 
   // three balls
@@ -75,11 +75,14 @@ async function until(fn, ms) { const t = Date.now(); while (Date.now() - t < ms)
     if (keeps) check("a winner plays again (Ann, same bet)", r.session.state === "playing" && r.session.table.current === 0);
     else check("a loser passes the turn to Ben", r.session.state === "idle" && r.session.table.current === 1, [r.session.state, r.session.table.current]);
   }
-  // cash out and settle up
-  for (let guard = 0; guard < 6 && A.last("room").session.state !== "final"; guard++) {
-    const st = A.last("room").session, cur = st.table.players[st.table.current].name, who = cur === "Ann" ? A : B;
-    if (st.state === "idle" || st.state === "result") { who.say({ type: "cashout" }); await wait(100); }
-    who.say({ type: "primary" }); await wait(150);
+  // cash out and settle up (anyone can cash out at any time, even when it is not their turn)
+  B.say({ type: "cashout" }); await wait(150);
+  check("Ben cashed out out of turn: he is out of the pool", B.last("room").session.table.players[1].cashedOut === true);
+  check("money still conserved after a cash-out", Math.abs(total(B.last("room")) - START) < 1e-9);
+  for (let guard = 0; guard < 8 && A.last("room").session.state !== "final"; guard++) {
+    const st = A.last("room").session;
+    if (!st.table.players[0].cashedOut && (st.state === "idle" || st.state === "result")) { A.say({ type: "cashout" }); }
+    await wait(500);
   }
   r = A.last("room");
   check("everyone cashed out: settle-up screen", r.session.state === "final", r.session.state);
