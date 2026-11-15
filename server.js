@@ -63,7 +63,7 @@ const PORT = process.env.PORT || 3000;
 const IDLE_MS = Number(process.env.IDLE_MS) || 45000;   // someone is connected but does nothing
 const GONE_MS = Number(process.env.GONE_MS) || 20000;   // the player's phone is disconnected
 const REACTIONS = ["\u{1F44F}", "\u{1F602}", "\u{1F62E}", "\u{1F525}", "\u{1F62D}", "\u{1F389}", "\u{1F440}", "\u2764\uFE0F"];   // the allowed reactions
-const SERVER_VERSION = "14c";                          // shown at /health and sent to the page, so the page can tell if the server is out of date
+const SERVER_VERSION = "15";                          // shown at /health and sent to the page, so the page can tell if the server is out of date
 const CHAT_KEEP = 30;                                   // how many chat lines a room remembers for people who join late
 
 // ---------- 1. HTTP: the front page and the health check ----------

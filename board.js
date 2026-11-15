@@ -22,8 +22,8 @@
 }(typeof self !== "undefined" ? self : this, function (Matter) {
 
   // ------ SETTINGS (the same numbers as the game page) ------
-  const BOARD_WIDTH = 400, BOARD_HEIGHT = 640;
-  const PEG_RADIUS = 6, PEG_ROWS = 5, PEG_SPACING = 50, FIRST_PEG_ROW_Y = 120, PEG_ROW_GAP = 45, PEG_BOUNCE = 0.2;
+  const BOARD_WIDTH = 450, BOARD_HEIGHT = 640;   // CHANGED IN 15: 400 -> 450. Must match the page.
+  const PEG_RADIUS = 6, PEG_ROWS = 4, PEG_SPACING = 50, FIRST_PEG_ROW_Y = 120, PEG_ROW_GAP = 45, PEG_BOUNCE = 0.2;
   const BALL_RADIUS = 9, BALL_BOUNCE = 0.5, GRAVITY = 1, BALL_AIR_RESISTANCE = 0.06;
   const BALL_CLEAR_FRAMES = 60;     // how long a landed ball sits in its cup (60 steps = 1 second)
   const ENTRY_MARGIN = 12;          // the ball enters this far from each side at most
@@ -34,14 +34,14 @@
   // GAME SPEED: how many times faster than a 60-steps-a-second clock the game runs. The game page runs at this speed too (see GAME_SPEED
   // in the page), so a ball falls at the same pace online and offline. 2.4 is what a 144 Hz laptop screen gave the first versions.
   const GAME_SPEED = 2.0;
-  // Thirteen cups, as in the first versions of the game. The width follows the prize a little: the Bell and the Star are narrower.
+  // Fourteen cups (CHANGED IN 15: a second Star was added). The width follows the prize a little: the Bell and the Star are narrower.
   // Only the proportions matter (the cups are stretched to fill the board).
   const CUP_RECIPE = [
     { fruit: "Cherry",    count: 3, width: 34 },
     { fruit: "Peach",     count: 3, width: 34 },
     { fruit: "Pineapple", count: 2, width: 34 },
     { fruit: "Lemon",     count: 2, width: 34 },
-    { fruit: "Star",      count: 1, width: 30 },
+    { fruit: "Star",      count: 2, width: 30 },
     { fruit: "Bell",      count: 2, width: 28 }
   ];
 
